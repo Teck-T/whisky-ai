@@ -1,0 +1,129 @@
+"""コマンドラインインターフェース。
+
+    whisky-ai init-db              マイグレーション適用
+    whisky-ai seed-sample          架空サンプルカタログ + モック出品を投入
+    whisky-ai match                未処理の出品を照合
+    whisky-ai review list          要確認キューを表示
+    whisky-ai review accept ID     候補を承認
+    whisky-ai review reject LISTING_ID
+    whisky-ai stats                件数の概要
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+from collections.abc import Sequence
+
+from whisky_ai import db, repository, sample_data
+from whisky_ai.matching import Catalog, Matcher, accept_candidate, reject_listing, resolve_unprocessed
+
+
+def _cmd_init(conn: sqlite3.Connection, _: argparse.Namespace) -> int:
+    applied = db.migrate(conn)
+    print(f"applied: {', '.join(applied) if applied else '(up to date)'}")
+    return 0
+
+
+def _cmd_seed(conn: sqlite3.Connection, _: argparse.Namespace) -> int:
+    db.migrate(conn)
+    if conn.execute("SELECT COUNT(*) FROM bottles").fetchone()[0]:
+        print("catalog is not empty; seed-sample expects a fresh database", file=sys.stderr)
+        return 1
+    cat = sample_data.load_sample_catalog(conn)
+    with conn:
+        shop = repository.upsert_shop(conn, "mock", "mock-shop", "モック酒店 (架空)")
+        src = repository.add_source(conn, "sample", "モック出品 (架空)")
+        for item in sample_data.sample_listings(cat):
+            lid = repository.upsert_listing(conn, repository.ListingData(
+                "mock", item.external_item_id, item.title, jan_raw=item.jan, shop_id=shop,
+                item_url=f"https://example.invalid/items/{item.external_item_id}",
+            ))
+            repository.record_price_observation(conn, repository.PriceObservation(
+                lid, item.price_jpy, src, price_tax_included=True, shipping_condition="unknown",
+                in_stock=True,
+            ))
+    print(f"brands={len(cat.brand_ids)} bottles={len(cat.bottle_ids)}")
+    return 0
+
+
+def _cmd_match(conn: sqlite3.Connection, _: argparse.Namespace) -> int:
+    counts = resolve_unprocessed(conn, Matcher(Catalog.load(conn)))
+    print(json.dumps(counts, ensure_ascii=False))
+    return 0
+
+
+def _cmd_review(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
+    if args.action == "list":
+        rows = conn.execute(
+            """
+            SELECT mc.id, mc.listing_id, l.title, b.display_name, mc.score, mc.reasons
+            FROM match_candidates mc
+            JOIN listings l ON l.id = mc.listing_id
+            JOIN bottles b ON b.id = mc.bottle_id
+            WHERE mc.status = 'pending'
+            ORDER BY mc.listing_id, mc.score DESC
+            """
+        ).fetchall()
+        for r in rows:
+            reasons = json.loads(r["reasons"])
+            print(f"[{r['id']}] listing={r['listing_id']} score={r['score']:.3f}\n"
+                  f"    出品: {r['title']}\n    候補: {r['display_name']}\n"
+                  f"    理由: {', '.join(reasons['listing'] + reasons['candidate'])}")
+        print(f"{len(rows)} pending candidate(s)")
+    elif args.action == "accept":
+        accept_candidate(conn, args.id, args.by, register_jan=args.register_jan)
+        print(f"accepted candidate {args.id}")
+    elif args.action == "reject":
+        reject_listing(conn, args.id, args.by)
+        print(f"rejected listing {args.id}")
+    return 0
+
+
+def _cmd_stats(conn: sqlite3.Connection, _: argparse.Namespace) -> int:
+    for table in ("distilleries", "brands", "releases", "batches", "bottles", "product_identifiers",
+                  "listings", "match_candidates", "price_observations", "flavor_extractions"):
+        print(f"{table:22s} {conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]}")
+    for r in conn.execute("SELECT match_status, COUNT(*) FROM listings GROUP BY 1 ORDER BY 1"):
+        print(f"  listings.{r[0]:16s} {r[1]}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="whisky-ai")
+    p.add_argument("--db", help=f"SQLite path (default: ${db.DEFAULT_DB_ENV} or {db.DEFAULT_DB_PATH})")
+    sub = p.add_subparsers(dest="command", required=True)
+    sub.add_parser("init-db").set_defaults(func=_cmd_init)
+    sub.add_parser("seed-sample").set_defaults(func=_cmd_seed)
+    sub.add_parser("match").set_defaults(func=_cmd_match)
+    sub.add_parser("stats").set_defaults(func=_cmd_stats)
+    review = sub.add_parser("review")
+    review.set_defaults(func=_cmd_review)
+    rsub = review.add_subparsers(dest="action", required=True)
+    rsub.add_parser("list")
+    acc = rsub.add_parser("accept")
+    acc.add_argument("id", type=int, help="match_candidates.id")
+    acc.add_argument("--by", default="cli")
+    acc.add_argument("--register-jan", action="store_true",
+                     help="出品の JAN を承認したボトルの識別子として登録する")
+    rej = rsub.add_parser("reject")
+    rej.add_argument("id", type=int, help="listings.id")
+    rej.add_argument("--by", default="cli")
+    return p
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    conn = db.connect(args.db)
+    try:
+        if args.command not in ("init-db", "seed-sample"):
+            db.migrate(conn)
+        return int(args.func(conn, args))
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
