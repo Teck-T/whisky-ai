@@ -1,0 +1,38 @@
+[project]
+name = "whisky-ai"
+version = "0.1.0"
+description = "Whisky AI データ基盤: 正規化商品マスター・商品同一性判定・価格履歴・香味特徴 JSON"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+
+[project.scripts]
+whisky-ai = "whisky_ai.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/whisky_ai"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # 全角文字を含む日本語コメント/文字列を許可
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src"]
