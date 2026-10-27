@@ -1,6 +1,6 @@
 # Whisky AI データ基盤 設計書
 
-対象: PR 1（データベース設計と商品同一性判定）。価格収集モジュールは PR 2 で実装する（§7）。
+対象: PR 1（データベース設計と商品同一性判定）と PR 2（価格収集モジュール、§7）。
 
 ## 1. 目的と範囲
 
@@ -13,7 +13,7 @@
 | 2. JAN・商品名・容量・度数・バッチ番号から同一商品を照合する | §4, `matching.py`, `normalize.py` |
 | 3. 不確実な照合は自動統合せず「要確認」として保存する | §4.4, `match_candidates` |
 | 4. 楽天 / Yahoo! API の仕様・規約の調査 | [`api_research.md`](api_research.md) |
-| 5. 価格収集モジュール（APIキーなしでもモックで試験可能） | PR 2（§7） |
+| 5. 価格収集モジュール（APIキーなしでもモックで試験可能） | §7, `collectors/` |
 | 6. 価格履歴・送料・税込・在庫・取得日時・販売店・URL・情報源を保存する | `price_observations`, `shops`, `listings` |
 | 7. メーカー希望小売価格と実勢価格を混同しない。出典のない定価は作らない | §5 |
 | 8. LLM の香味特徴 JSON を格納できるスキーマ | §6, `flavor.py` |
@@ -185,21 +185,47 @@ listings.match_status:
 
 ## 7. 価格収集（PR 2）の構成
 
-PR 1 には、PR 2 が使うテーブルと書き込み API（`upsert_shop`、`upsert_listing`、`record_price_observation`、
-`api_raw_responses`）をすでに入れている。PR 2 で追加するのは次のとおり。
-
 ```
 src/whisky_ai/collectors/
-  base.py        Collector プロトコル: search(query|jan) -> list[Offer]
-  rate_limit.py  1 リクエスト/秒のトークンバケット、429 のときの指数バックオフ
-  rakuten.py     楽天市場商品検索 API (openapi.rakuten.co.jp, applicationId + accessKey)
-  yahoo.py       Yahoo!ショッピング商品検索 API v3 (appid)
-  mock.py        JSON フィクスチャを返すクライアント (APIキーなしで試験)
-  pipeline.py    Offer → upsert_listing → resolve_listing → record_price_observation
+  base.py        共通型: SearchQuery / Offer / SearchResult / Collector プロトコル
+  http.py        urllib による最小 HTTP 層 (Transport を差し替えてテスト)
+  rate_limit.py  最小間隔 1 秒のレートリミッタ、429/5xx の指数バックオフ (Retry-After 優先)
+  rakuten.py     楽天市場商品検索 API 2026-07-01 (applicationId + accessKey、任意で Referer)
+  yahoo.py       Yahoo!ショッピング商品検索 API v3 (appid、jan_code 検索)
+  mock.py        フィクスチャ (fixtures/*.json、架空データ) を返す Transport
+  factory.py     環境変数から Collector を作る。キーがなければ mock
+  pipeline.py    検索 → 生レスポンス保存 → upsert_listing → 価格観測を追記 → resolve_listing
 ```
 
-* API キーは環境変数（`.env.example`）から読む。キーがなければ mock に切り替え、テストはすべて mock で動かす。
-* `api_raw_responses.request_params` には API キーを保存しない。`expires_at` で保持期限を管理する。
+* **Collector は DB に触れない。** API の 1 商品を `Offer` に変換するだけで、不明な値は None のまま渡す。
+  保存と照合は `pipeline.collect` が PR 1 の `repository` / `matching` を使って行う。
+* **API キー**: 環境変数（`.env.example`）から読む。楽天は 2 つのキーが揃っていないと実通信しない。
+  キーがないときは `marketplace='mock'`、出典 `kind='sample'` のフィクスチャを使い、実データと混ざらないようにする。
+  テストはすべて FakeTransport かフィクスチャで動き、実通信しない。
+* **キーの漏洩防止**: 生レスポンスの `request_params` には認証パラメータを入れない。
+  `repository.add_raw_response` は `applicationId`、`accessKey`、`affiliateId`、`appid` を含む dict を拒否する。
+  エラーメッセージにもキーを含めない。
+* **レート制限**: 1 つの Collector インスタンスにつき最小間隔 1 秒。429/5xx は 2→4→8 秒の指数バックオフで最大 3 回まで再試行し、
+  `Retry-After` があればそれを優先する。複数プロセスで同時に動かす場合の制御はしていない（§9）。
+* **フィールドの対応**（[`api_research.md`](api_research.md)）:
+
+| 保存先 | 楽天 | Yahoo! |
+|---|---|---|
+| `price_jpy` | `itemPrice` | `price` |
+| `price_tax_included` | `taxFlag` 0→税込、1→税抜 | `taxExcludePrice` が併記され、`price` より小さいときだけ税込。それ以外は NULL |
+| `shipping_condition` | `postageFlag` 0→`included`、1→`separate` | `shipping.code` 2→`free`、3→`conditional_free`、1→`unknown` |
+| `shipping_fee_jpy` | NULL（API に金額がない） | NULL（同左）。`free`/`included` のときだけ 0 |
+| `in_stock` | `availability` | `inStock` |
+| `jan_raw` | なし（API にない） | `janCode`（空なら NULL） |
+| `external_item_id` / 販売店 | `itemCode` / `shopCode`、`shopName`、`shopUrl` | `code` / `seller.sellerId`、`name`、`url` |
+
+* **生レスポンスの保持**: `WHISKY_AI_RAW_RETENTION_DAYS`（既定 30 日。0 なら保存しない）で `expires_at` を決める。
+  `whisky-ai purge-raw` で期限切れを削除する。価格観測は残し、生レスポンスへの参照だけ外す。
+* **手動確定の保護**: 同じ出品を再収集すると価格観測は追記されるが、人が確定した照合（`manual`）は上書きしない。
+  タイトルや JAN が変わった場合だけ再照合する（§4.4）。
+* **実エンドポイントの確認**: 2026-10-27 にキーなしで各 1 回リクエストし、楽天は HTTP 400
+  `applicationId must be present ...`、Yahoo! は HTTP 401 `Authentication parameters ... incompleted` が返ることを確認した。
+  URL が実在することと、エラーの形式はこれで確かめた。キーを使った正常系の通信は未検証（キーがないため）。
 
 ## 8. PostgreSQL への移行
 
@@ -220,4 +246,7 @@ src/whisky_ai/collectors/
 * **オープン価格の扱い**: 金額のない「オープン価格」記録を許可するスキーマ変更（`price_jpy` を NULL 可にする）。
 * **セット商品・グラス付き・複数本セット**の検出（現状は単品として照合を試み、容量から外れることが多い）。
 * **レビュー UI**: 現状は CLI だけ。
+* **実キーでの疎通確認**: API キーを取得したら、正常系のレスポンスでフィールドの対応を確認する（特に楽天 2026-07-01 版の formatVersion=2 と、Yahoo! の税込判定）。
+* **定期収集**: 監視対象（ボトルごとの検索キーワードと JAN）のテーブルと、cron / launchd による定期実行。複数プロセス間で共有するレートリミッタ。
+* **楽天の Referer**: 新 API で必須かどうかが二次情報しかない。必要なら `RAKUTEN_REFERER` を設定する。
 * **価格データの保持期限**: 各 API の規約の確認が終わり次第、`api_raw_responses.expires_at` の既定値を決める（[`api_research.md`](api_research.md) の未確認事項）。

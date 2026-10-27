@@ -7,6 +7,9 @@
     whisky-ai review accept ID     候補を承認
     whisky-ai review reject LISTING_ID
     whisky-ai stats                件数の概要
+    whisky-ai collect rakuten|yahoo --keyword KW [--jan JAN] [--page N] [--mock]
+    whisky-ai prices BOTTLE_ID     照合確定済み出品の最新価格
+    whisky-ai purge-raw            保持期限切れの API 生レスポンスを削除
 """
 
 from __future__ import annotations
@@ -18,6 +21,11 @@ import sys
 from collections.abc import Sequence
 
 from whisky_ai import db, repository, sample_data
+from whisky_ai.collectors.base import SearchQuery
+from whisky_ai.collectors.factory import build_collector
+from whisky_ai.collectors.pipeline import collect
+from whisky_ai.collectors.rakuten import CollectorError
+from whisky_ai.collectors.rate_limit import RateLimitExceeded
 from whisky_ai.matching import Catalog, Matcher, accept_candidate, reject_listing, resolve_unprocessed
 
 
@@ -91,6 +99,41 @@ def _cmd_stats(conn: sqlite3.Connection, _: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_collect(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
+    collector = build_collector(args.source, force_mock=args.mock)
+    if collector.is_mock:
+        print(f"[mock] {args.source} の API キーが未設定 (または --mock) のためフィクスチャを使用します",
+              file=sys.stderr)
+    try:
+        query = SearchQuery(keyword=args.keyword, jan=args.jan, page=args.page)
+        summary = collect(conn, collector, query)
+    except (ValueError, CollectorError, RateLimitExceeded) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(json.dumps({"offers": summary.offers, "observations": summary.observations,
+                      "match_status": dict(summary.match_status)}, ensure_ascii=False))
+    for w in summary.warnings:
+        print(f"warning: {w}", file=sys.stderr)
+    return 0
+
+
+def _cmd_prices(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
+    rows = repository.latest_prices_for_bottle(conn, args.bottle_id)
+    for r in rows:
+        incl = "?" if r["tax_included_price_jpy"] is None else f"{r['tax_included_price_jpy']:,}"
+        ship = "?" if r["shipping_fee_jpy"] is None else f"{r['shipping_fee_jpy']:,}"
+        stock = {1: "在庫あり", 0: "在庫なし"}.get(r["in_stock"], "在庫不明")
+        print(f"{r['observed_at']} {r['marketplace']:8s} 税込 {incl} 円 / 送料 {ship} 円"
+              f" ({r['shipping_condition']}) {stock} {r['shop_name'] or ''}\n    {r['item_url'] or ''}")
+    print(f"{len(rows)} listing(s)")
+    return 0
+
+
+def _cmd_purge_raw(conn: sqlite3.Connection, _: argparse.Namespace) -> int:
+    print(f"purged {repository.purge_expired_raw_responses(conn)} raw response(s)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="whisky-ai")
     p.add_argument("--db", help=f"SQLite path (default: ${db.DEFAULT_DB_ENV} or {db.DEFAULT_DB_PATH})")
@@ -99,6 +142,17 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("seed-sample").set_defaults(func=_cmd_seed)
     sub.add_parser("match").set_defaults(func=_cmd_match)
     sub.add_parser("stats").set_defaults(func=_cmd_stats)
+    col = sub.add_parser("collect", help="マーケットプレイス API から価格を収集")
+    col.add_argument("source", choices=["rakuten", "yahoo"])
+    col.add_argument("--keyword")
+    col.add_argument("--jan", help="JAN で検索 (Yahoo! のみ)")
+    col.add_argument("--page", type=int, default=1)
+    col.add_argument("--mock", action="store_true", help="API キーがあってもフィクスチャを使う")
+    col.set_defaults(func=_cmd_collect)
+    pr = sub.add_parser("prices")
+    pr.add_argument("bottle_id", type=int)
+    pr.set_defaults(func=_cmd_prices)
+    sub.add_parser("purge-raw").set_defaults(func=_cmd_purge_raw)
     review = sub.add_parser("review")
     review.set_defaults(func=_cmd_review)
     rsub = review.add_subparsers(dest="action", required=True)

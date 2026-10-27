@@ -6,6 +6,7 @@ SQL はここに集約し、呼び出し側 (CLI・将来の価格収集モジ�
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from typing import Literal
@@ -16,6 +17,9 @@ from whisky_ai.normalize import normalize_batch_code, normalize_text, parse_gtin
 SourceKind = Literal["official_site", "press_release", "api", "retailer_page", "manual_entry", "sample"]
 Marketplace = Literal["rakuten", "yahoo", "mock", "manual"]
 ShippingCondition = Literal["included", "free", "conditional_free", "separate", "unknown"]
+
+# DB やログに残してはいけないリクエストパラメータ名
+SECRET_PARAM_NAMES = frozenset({"applicationId", "accessKey", "affiliateId", "appid"})
 
 
 def _insert(conn: sqlite3.Connection, table: str, values: dict[str, object]) -> int:
@@ -285,3 +289,48 @@ def latest_prices_for_bottle(conn: sqlite3.Connection, bottle_id: int) -> list[s
         """,
         (bottle_id,),
     ).fetchall()
+
+
+# ===== API 生レスポンス・情報源 =====
+
+
+def get_or_create_source(
+    conn: sqlite3.Connection, kind: SourceKind, title: str, *, url: str | None = None,
+    publisher: str | None = None,
+) -> int:
+    """(kind, title) が同じ出典は使い回す (API ごとに 1 行)。"""
+    row = conn.execute("SELECT id FROM sources WHERE kind = ? AND title = ?", (kind, title)).fetchone()
+    if row is not None:
+        return int(row["id"])
+    return add_source(conn, kind, title, url=url, publisher=publisher)
+
+
+def add_raw_response(
+    conn: sqlite3.Connection, marketplace: str, endpoint: str, request_params: dict[str, object],
+    status_code: int, body: str | None, *, fetched_at: str, expires_at: str | None,
+) -> int:
+    """API の生レスポンスを保存する。``request_params`` に認証情報を含めないこと
+    (呼び出し側で除去済みであることを ``SECRET_PARAM_NAMES`` で再確認する)。"""
+    leaked = SECRET_PARAM_NAMES & set(request_params)
+    if leaked:
+        raise ValueError(f"refusing to store secret params: {sorted(leaked)}")
+    return _insert(conn, "api_raw_responses", {
+        "marketplace": marketplace, "endpoint": endpoint,
+        "request_params": json.dumps(request_params, ensure_ascii=False, sort_keys=True),
+        "status_code": status_code, "body": body, "fetched_at": fetched_at, "expires_at": expires_at,
+    })
+
+
+def purge_expired_raw_responses(conn: sqlite3.Connection, now: str | None = None) -> int:
+    """保持期限切れの生レスポンスを削除する。価格観測からの参照は NULL にして観測自体は残す。"""
+    now = now or utcnow()
+    with conn:
+        conn.execute(
+            "UPDATE price_observations SET raw_response_id = NULL WHERE raw_response_id IN "
+            "(SELECT id FROM api_raw_responses WHERE expires_at IS NOT NULL AND expires_at <= ?)",
+            (now,),
+        )
+        cur = conn.execute(
+            "DELETE FROM api_raw_responses WHERE expires_at IS NOT NULL AND expires_at <= ?", (now,)
+        )
+    return cur.rowcount

@@ -1,0 +1,32 @@
+{
+  "_comment": "架空データ。Yahoo!ショッピング商品検索API v3 のレスポンス形式を模したもの。実在の店舗・商品ではない。JAN はサンプルカタログのインストアコード。",
+  "totalResultsAvailable": 6,
+  "totalResultsReturned": 6,
+  "firstResultsPosition": 1,
+  "hits": [
+    {"code": "mock-store_aw12", "name": "Aokawa 12年 シングルモルト 700ml", "url": "https://example.invalid/mock-store/aw12",
+     "price": 6200, "taxExcludePrice": 5637, "inStock": true, "janCode": "2900000000049",
+     "shipping": {"code": 2, "name": "送料無料"},
+     "seller": {"sellerId": "mock-store", "name": "モックストア (架空)", "url": "https://example.invalid/mock-store/"}},
+    {"code": "mock-store_ard12", "name": "アードヴェラン 12年", "url": "https://example.invalid/mock-store/ard12",
+     "price": 7700, "taxExcludePrice": 7000, "inStock": true, "janCode": "2900000000643",
+     "shipping": {"code": 3, "name": "条件付き送料無料"},
+     "seller": {"sellerId": "mock-store", "name": "モックストア (架空)", "url": "https://example.invalid/mock-store/"}},
+    {"code": "mock-shop2_kcs", "name": "Kurogane Cask Strength 700ml", "url": "https://example.invalid/mock-shop2/kcs",
+     "price": 14800, "inStock": true, "janCode": "2900000001411",
+     "shipping": {"code": 1, "name": "設定なし"},
+     "seller": {"sellerId": "mock-shop2", "name": "モックショップ2 (架空)", "url": "https://example.invalid/mock-shop2/"}},
+    {"code": "mock-shop2_mp43", "name": "ミストラルピーク オリジナル 700ml", "url": "https://example.invalid/mock-shop2/mp43",
+     "price": 2680, "taxExcludePrice": 2437, "inStock": false, "janCode": "2900000001404",
+     "shipping": {"code": 1, "name": "設定なし"},
+     "seller": {"sellerId": "mock-shop2", "name": "モックショップ2 (架空)", "url": "https://example.invalid/mock-shop2/"}},
+    {"code": "mock-shop2_bad", "name": "Hoshizora Sherry Cask 12年 700ml", "url": "https://example.invalid/mock-shop2/bad",
+     "price": 9900, "taxExcludePrice": 9000, "inStock": true, "janCode": "2900000000291",
+     "shipping": {"code": 2, "name": "送料無料"},
+     "seller": {"sellerId": "mock-shop2", "name": "モックショップ2 (架空)", "url": "https://example.invalid/mock-shop2/"}},
+    {"code": "mock-store_gco", "name": "Glen Corrach Original 700ml", "url": "https://example.invalid/mock-store/gco",
+     "price": 3300, "taxExcludePrice": 3000, "inStock": true, "janCode": "",
+     "shipping": {"code": 2, "name": "送料無料"},
+     "seller": {"sellerId": "mock-store", "name": "モックストア (架空)", "url": "https://example.invalid/mock-store/"}}
+  ]
+}
