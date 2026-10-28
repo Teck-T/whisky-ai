@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd 用。REPO_DIR をリポジトリの絶対パスに置き換えて
+  ~/Library/LaunchAgents/ にコピーする (手順は README「定期収集」)。
+  1 日 2 回起動するが、実際に API を呼ぶのは各監視対象の間隔 (既定 24 時間) が過ぎたものだけ。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.whisky-ai.watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>REPO_DIR/scripts/run_watch.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>17</integer></dict>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>17</integer></dict>
+  </array>
+  <key>StandardErrorPath</key>
+  <string>REPO_DIR/data/logs/launchd.err</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

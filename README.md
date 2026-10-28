@@ -20,7 +20,7 @@ LLM の学習と推論はこのリポジトリの範囲外です。
 * メーカー希望小売価格は別テーブルに保存し、出典がないと登録できない
 * LLM 香味特徴 JSON の検証と保存（不正な出力も原文を保存する）
 
-* 楽天市場 / Yahoo!ショッピングの商品検索 API による価格収集。API キーがなければ架空のフィクスチャで動きます（[設計書 §7](docs/design.md#7-価格収集pr-2の構成)）
+* 楽天市場 / Yahoo!ショッピングの商品検索 API による価格収集と、監視リストによる定期収集。API キーがなければ架空のフィクスチャで動きます（[設計書 §7](docs/design.md#7-価格収集pr-2の構成)）
 
 ## セットアップ（macOS / Linux）
 
@@ -87,6 +87,46 @@ matcher = Matcher(Catalog.load(conn))
 r = matcher.match(ListingInput("【送料無料】Aokawa 12年 700ml 正規品"))
 print(r.decision, r.bottle_id, r.reasons)
 ```
+
+## 実 API への接続チェック
+
+API キーを `.env` に書いたら、最初にこれを実行してください。
+
+```bash
+set -a; source .env; set +a
+whisky-ai check-api          # 楽天と Yahoo! の両方。片方だけなら check-api rakuten
+```
+
+設定されている環境変数（キーは一部だけ表示）、このマシンのグローバル IPv4、テスト検索の結果を表示します。
+楽天で 403 が出たら、表示された IPv4 が楽天アプリ設定の「許可された IP アドレス」と一致しているか、
+`RAKUTEN_REFERER` がアプリ URL と一致しているかを確認してください。
+
+## 監視リストと定期収集
+
+```bash
+whisky-ai watch add --bottle-id 12          # カタログのボトルから楽天/Yahoo! の監視対象を作る
+whisky-ai watch add --keyword "山崎 12年" --source rakuten
+whisky-ai watch list                         # 前回の実行結果とエラーも表示
+whisky-ai watch run                          # 前回から 24 時間以上たった対象だけ収集
+whisky-ai watch run --mock                   # キーがなくてもフィクスチャで試せる
+whisky-ai watch disable 3
+```
+
+### macOS で自動実行する（launchd）
+
+```bash
+REPO_DIR="$(pwd)"   # リポジトリの絶対パス
+sed "s#REPO_DIR#$REPO_DIR#g" deploy/macos/com.whisky-ai.watch.plist \
+  > ~/Library/LaunchAgents/com.whisky-ai.watch.plist
+mkdir -p data/logs
+launchctl load ~/Library/LaunchAgents/com.whisky-ai.watch.plist
+launchctl start com.whisky-ai.watch          # すぐに 1 回試す
+tail data/logs/watch-*.log
+```
+
+毎日 7:17 と 19:17 に起動します。API を呼ぶのは間隔（既定 24 時間）が過ぎた対象だけです。
+止めるときは `launchctl unload ~/Library/LaunchAgents/com.whisky-ai.watch.plist` を実行します。
+Mac がスリープ中だった回は、起動後に実行されます。
 
 ## 開発
 

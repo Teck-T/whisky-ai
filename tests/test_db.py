@@ -11,17 +11,17 @@ EXPECTED_TABLES = {
     "sources", "distilleries", "brands", "brand_distilleries", "releases", "batches", "bottles",
     "product_identifiers", "aliases", "retail_price_references", "shops", "listings",
     "match_candidates", "api_raw_responses", "price_observations", "reviews",
-    "flavor_extractions", "flavor_notes", "flavor_axes", "schema_migrations",
+    "flavor_extractions", "flavor_notes", "flavor_axes", "schema_migrations", "watch_targets",
 }
 
 
 def test_migrate_creates_all_tables_and_is_idempotent(tmp_path: Path) -> None:
     conn = db.connect(tmp_path / "t.sqlite3")
-    assert db.migrate(conn) == ["0001_initial.sql"]
+    assert db.migrate(conn) == ["0001_initial.sql", "0002_watch_targets.sql"]
     assert db.migrate(conn) == []
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert tables >= EXPECTED_TABLES
-    assert db.current_version(conn) == 1
+    assert db.current_version(conn) == 2
 
 
 def test_foreign_keys_enforced(conn: sqlite3.Connection) -> None:

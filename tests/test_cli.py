@@ -33,3 +33,18 @@ def test_cli_collect_mock(tmp_path: Path, capsys: pytest.CaptureFixture[str],
     assert main(["--db", dbp, "collect", "yahoo", "--jan", "2900000000049"]) == 0
     assert main(["--db", dbp, "prices", "1"]) == 0
     assert main(["--db", dbp, "purge-raw"]) == 0
+
+
+def test_cli_watch_flow(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    dbp = str(tmp_path / "w.sqlite3")
+    assert main(["--db", dbp, "seed-sample"]) == 0
+    assert main(["--db", dbp, "watch", "add", "--bottle-id", "1"]) == 0
+    assert main(["--db", dbp, "watch", "add", "--keyword", "Mistral Peak", "--source", "rakuten"]) == 0
+    assert main(["--db", dbp, "watch", "add"]) == 2
+    assert main(["--db", dbp, "watch", "run", "--mock"]) == 0
+    assert main(["--db", dbp, "watch", "disable", "1"]) == 0
+    capsys.readouterr()
+    assert main(["--db", dbp, "watch", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "[1] off" in out and " ok" in out
+    assert (tmp_path / "w.lock").exists()

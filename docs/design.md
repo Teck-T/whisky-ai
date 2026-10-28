@@ -206,7 +206,7 @@ src/whisky_ai/collectors/
   `repository.add_raw_response` は `applicationId`、`accessKey`、`affiliateId`、`appid` を含む dict を拒否する。
   エラーメッセージにもキーを含めない。
 * **レート制限**: 1 つの Collector インスタンスにつき最小間隔 1 秒。429/5xx は 2→4→8 秒の指数バックオフで最大 3 回まで再試行し、
-  `Retry-After` があればそれを優先する。複数プロセスで同時に動かす場合の制御はしていない（§9）。
+  `Retry-After` があればそれを優先する。`whisky-ai watch run` は DB ごとのロックファイルで多重起動を防ぐ（§7.1）。それ以外の経路で複数プロセスを同時に動かす場合の制御はしていない。
 * **フィールドの対応**（[`api_research.md`](api_research.md)）:
 
 | 保存先 | 楽天 | Yahoo! |
@@ -227,6 +227,29 @@ src/whisky_ai/collectors/
   `applicationId must be present ...`、Yahoo! は HTTP 401 `Authentication parameters ... incompleted` が返ることを確認した。
   URL が実在することと、エラーの形式はこれで確かめた。キーを使った正常系の通信は未検証（キーがないため）。
 
+### 7.1 監視リストと定期収集（PR 3）
+
+* `watch_targets`（マイグレーション 0002）に「どのマーケットプレイスで、何を検索するか」を登録する。
+  * `watch add --bottle-id N` は、カタログのボトルから検索条件を作る。楽天は日本語名（銘柄 + リリース）のキーワード、
+    Yahoo! はボトルに JAN があれば JAN で検索する（名前より正確なため）。
+  * 楽天は JAN 検索ができないので、楽天の対象はキーワードが必須（アプリと DB の CHECK の両方で防ぐ）。
+* `watch run` は、前回実行から `min_interval_hours`（既定 24 時間）が過ぎた対象だけを収集する。
+  launchd から 1 日 2 回起動しても、API へのリクエストは対象ごとに 1 日 1 回に抑えられる。
+  * マーケットプレイスごとに Collector を 1 つだけ作り、1 回の実行の中でレート制限を共有する。
+  * 1 件が失敗しても残りは続け、対象ごとに `last_status` / `last_error` を記録する（`watch list` で確認できる）。
+  * DB と同じ場所のロックファイル（`*.lock`）で多重起動を防ぐ。
+* macOS では `scripts/run_watch.sh`（`.env` を読み込み、ログを `data/logs/` に追記）を
+  `deploy/macos/com.whisky-ai.watch.plist` から launchd で起動する。
+
+### 7.2 接続チェック（PR 3）
+
+`whisky-ai check-api` は、実キーで初めて試すときに失敗の原因を切り分けるためのコマンド。
+
+* 環境変数が揃っているかを表示する。キーは先頭 4 文字だけ見せる。
+* このマシンのグローバル IPv4 を表示する（楽天の「許可された IP アドレス」と見比べるため。`api.ipify.org` に問い合わせる）。
+* 検索を 1 回だけ行い、DB には保存しない。失敗したら、HTTP ステータスから考えられる原因を示す
+  （楽天の 403 → IP 制限か Referer、400/401 → キーの値）。
+
 ## 8. PostgreSQL への移行
 
 1. §3.3 の型対応で `0001_initial.sql` を PG 用の DDL に書き換える。
@@ -246,7 +269,7 @@ src/whisky_ai/collectors/
 * **オープン価格の扱い**: 金額のない「オープン価格」記録を許可するスキーマ変更（`price_jpy` を NULL 可にする）。
 * **セット商品・グラス付き・複数本セット**の検出（現状は単品として照合を試み、容量から外れることが多い）。
 * **レビュー UI**: 現状は CLI だけ。
-* **実キーでの疎通確認**: API キーを取得したら、正常系のレスポンスでフィールドの対応を確認する（特に楽天 2026-07-01 版の formatVersion=2 と、Yahoo! の税込判定）。
-* **定期収集**: 監視対象（ボトルごとの検索キーワードと JAN）のテーブルと、cron / launchd による定期実行。複数プロセス間で共有するレートリミッタ。
+* **実キーでの疎通確認**: API キーを取得したら `whisky-ai check-api` で接続を確かめ、正常系のレスポンスでフィールドの対応を確認する（特に楽天 2026-07-01 版の formatVersion=2 と、Yahoo! の税込判定）。
+* **監視キーワードの調整**: 自動生成のキーワードは日本語名（銘柄 + リリース）。英語表記の出品を取りこぼす場合は、英語キーワードの監視対象を追加する。
 * **楽天の Referer**: 新 API で必須かどうかが二次情報しかない。必要なら `RAKUTEN_REFERER` を設定する。
 * **価格データの保持期限**: 各 API の規約の確認が終わり次第、`api_raw_responses.expires_at` の既定値を決める（[`api_research.md`](api_research.md) の未確認事項）。
