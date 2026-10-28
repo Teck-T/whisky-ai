@@ -10,6 +10,10 @@
     whisky-ai collect rakuten|yahoo --keyword KW [--jan JAN] [--page N] [--mock]
     whisky-ai prices BOTTLE_ID     照合確定済み出品の最新価格
     whisky-ai purge-raw            保持期限切れの API 生レスポンスを削除
+    whisky-ai check-api [rakuten|yahoo]  実 API への接続チェック (1 回だけ検索、保存しない)
+    whisky-ai watch add --bottle-id N | --keyword KW [--source rakuten|yahoo|both]
+    whisky-ai watch list | enable ID | disable ID
+    whisky-ai watch run [--mock] [--all]  期限の来た監視対象を収集 (cron / launchd 向け)
 """
 
 from __future__ import annotations
@@ -19,8 +23,9 @@ import json
 import sqlite3
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
-from whisky_ai import db, repository, sample_data
+from whisky_ai import db, diagnostics, repository, sample_data, watchlist
 from whisky_ai.collectors.base import SearchQuery
 from whisky_ai.collectors.factory import build_collector
 from whisky_ai.collectors.pipeline import collect
@@ -134,6 +139,57 @@ def _cmd_purge_raw(conn: sqlite3.Connection, _: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check_api(_: sqlite3.Connection, args: argparse.Namespace) -> int:
+    sources: tuple[watchlist.Source, ...] = (
+        ("rakuten", "yahoo") if args.source == "all" else (args.source,))
+    ok = True
+    for source in sources:
+        res = diagnostics.check_api(source)
+        print("\n".join(res.lines))
+        ok &= res.ok
+    return 0 if ok else 1
+
+
+def _cmd_watch(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
+    if args.action == "add":
+        sources: tuple[watchlist.Source, ...] = (
+            ("rakuten", "yahoo") if args.source == "both" else (args.source,))
+        if args.bottle_id is not None:
+            ids = watchlist.add_targets_for_bottle(conn, args.bottle_id, sources, keyword=args.keyword,
+                                                   min_interval_hours=args.interval_hours)
+        elif args.keyword or args.jan:
+            ids = [watchlist.add_target(conn, s, label=args.label or args.keyword or args.jan,
+                                        keyword=args.keyword, jan=args.jan if s == "yahoo" else None,
+                                        min_interval_hours=args.interval_hours) for s in sources]
+        else:
+            print("error: --bottle-id か --keyword / --jan を指定してください", file=sys.stderr)
+            return 2
+        print(f"added watch target(s): {ids}")
+    elif args.action == "list":
+        for r in conn.execute("SELECT * FROM watch_targets ORDER BY id"):
+            query = f"jan={r['jan']}" if r["jan"] else f"keyword={r['keyword']!r}"
+            state = "on " if r["enabled"] else "off"
+            last = f"{r['last_run_at']} {r['last_status']}" if r["last_run_at"] else "未実行"
+            print(f"[{r['id']}] {state} {r['marketplace']:7s} {query} every {r['min_interval_hours']}h"
+                  f" | {r['label']} | {last}" + (f" ({r['last_error']})" if r["last_error"] else ""))
+    elif args.action in ("enable", "disable"):
+        watchlist.set_enabled(conn, args.id, args.action == "enable")
+        print(f"{args.action}d watch target {args.id}")
+    elif args.action == "run":
+        lock = db.resolve_db_path(args.db).with_suffix(".lock")
+        with watchlist.single_instance(Path(lock)) as acquired:
+            if not acquired:
+                print("another watch run is in progress; skipped", file=sys.stderr)
+                return 0
+            report = watchlist.run_due(conn, force_mock=args.mock, run_all=args.all)
+        print(json.dumps({"ran": report.ran, "match_status": report.match_status,
+                          "errors": len(report.errors)}, ensure_ascii=False))
+        for e in report.errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 1 if report.errors else 0
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="whisky-ai")
     p.add_argument("--db", help=f"SQLite path (default: ${db.DEFAULT_DB_ENV} or {db.DEFAULT_DB_PATH})")
@@ -153,6 +209,25 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("bottle_id", type=int)
     pr.set_defaults(func=_cmd_prices)
     sub.add_parser("purge-raw").set_defaults(func=_cmd_purge_raw)
+    chk = sub.add_parser("check-api", help="実 API への接続チェック")
+    chk.add_argument("source", nargs="?", choices=["rakuten", "yahoo", "all"], default="all")
+    chk.set_defaults(func=_cmd_check_api)
+    watch = sub.add_parser("watch", help="監視対象の管理と定期収集")
+    watch.set_defaults(func=_cmd_watch)
+    wsub = watch.add_subparsers(dest="action", required=True)
+    wadd = wsub.add_parser("add")
+    wadd.add_argument("--bottle-id", type=int)
+    wadd.add_argument("--keyword")
+    wadd.add_argument("--jan", help="Yahoo! のみ JAN で検索")
+    wadd.add_argument("--label")
+    wadd.add_argument("--source", choices=["rakuten", "yahoo", "both"], default="both")
+    wadd.add_argument("--interval-hours", type=int, default=24)
+    wsub.add_parser("list")
+    for name in ("enable", "disable"):
+        wsub.add_parser(name).add_argument("id", type=int)
+    wrun = wsub.add_parser("run")
+    wrun.add_argument("--mock", action="store_true", help="API キーがあってもフィクスチャを使う")
+    wrun.add_argument("--all", action="store_true", help="間隔を無視して全対象を収集")
     review = sub.add_parser("review")
     review.set_defaults(func=_cmd_review)
     rsub = review.add_subparsers(dest="action", required=True)
