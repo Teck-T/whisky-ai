@@ -1,7 +1,7 @@
 # 楽天市場 / Yahoo!ショッピング 商品検索 API 調査メモ
 
 調査日: 2026-10-27。公式ドキュメントの Web ページを取得して確認した。
-**「未確認」と書いた項目は推測で埋めていない。** PR 2 に着手する前に、アプリ登録画面と規約の原文で確認すること。
+**「未確認」と書いた項目は推測で埋めていない。** 実キーで運用を始める前に、アプリ登録画面と規約の原文で確認すること。
 
 ## 1. 楽天市場商品検索 API（Rakuten Web Service）
 
@@ -12,6 +12,7 @@
 | 認証 | `applicationId` と `accessKey` の **両方が必須**。`accessKey` はヘッダーとクエリパラメータのどちらでも送れる | 公式ドキュメントで確認 |
 | アフィリエイト | `affiliateId` は任意。指定すると `affiliateUrl` / `shopAffiliateUrl` が返る | 公式ドキュメントで確認 |
 | 検索条件 | `keyword` / `genreId` / `itemCode` / `shopCode` のどれか 1 つが必須 | 公式ドキュメントで確認 |
+| 実エンドポイント | 2026-10-27 にキーなしで 1 回リクエストし、HTTP 400 `{"errors": {"errorCode": 400, "errorMessage": "applicationId must be present in the query parameter or request body"}}` を確認 | 実測 |
 | 旧 API | 旧ドメイン `app.rakuten.co.jp` 系は 2026-05-13 に廃止され、アプリの再登録が必要だったと報告されている | **二次情報のみ**（個人開発者の記事） |
 | Referer | 新 API は Referer ヘッダーを検証し、ないと 403 になるという報告がある | **二次情報のみ** |
 | レート制限 | 具体的な数値はドキュメントに記載がない。超過すると HTTP 429（`number of allowed requests has been exceeded`）。同じ URL への短時間の集中アクセスは一時的に応答しなくなる | 公式（数値は**未確認**） |
@@ -38,7 +39,7 @@
 * `taxFlag=0` → `price_tax_included=1`。`taxFlag=1` → 税込額は推計せず NULL。
 * `postageFlag=0` → `shipping_condition='included'`。`1` → `'separate'`（送料額は NULL）。
 * JAN が返らないので、楽天の出品は **名前 + 仕様** で照合する。照合が不確実なものは要確認キューに入る。
-* レート制限の数値が不明なため、PR 2 では **1 リクエスト/秒** をデフォルトにし、429 を受けたら指数バックオフする。
+* レート制限の数値が不明なため、**1 リクエスト/秒** をデフォルトにし、429 を受けたら指数バックオフする（`collectors/rate_limit.py`）。
 * 共有保存の禁止に合わせ、`api_raw_responses` に `expires_at` を持たせ、定期的に削除できるようにした。
 
 ## 2. Yahoo!ショッピング 商品検索 API v3
@@ -54,6 +55,7 @@
 | 在庫 | `hits/inStock`（真偽値） | 公式ドキュメントで確認 |
 | 販売店 | `hits/seller/sellerId`、`name`、`url` | 公式ドキュメントで確認 |
 | URL | `hits/url` | 公式ドキュメントで確認 |
+| 実エンドポイント | 2026-10-27 にキーなしで 1 回リクエストし、HTTP 401 `{"Error": {"Message": "Bad Request: Authentication parameters in your request incompleted."}}` を確認 | 実測 |
 | アフィリエイト | バリューコマースのアフィリエイトプログラムを利用できる | 公式で確認 |
 | 旧仕様 | 商品検索 v1 は「旧仕様」。v3 を使う | 公式で確認 |
 
@@ -74,9 +76,9 @@
 * `priceLabel.taxable` と `taxExcludePrice` から税込 / 税抜を判断する。両方の金額が返る場合はどちらも保存できる。
 * `shipping.code` は 2 → `free`、3 → `conditional_free`、1 → `unknown`。送料額は NULL。
 * `janCode` が空でなければ `listings.jan_raw` に入れ、JAN で照合する。チェックディジットが不正な値は無視する（照合時の理由に記録）。
-* PR 2 では 1 リクエスト/秒を守るトークンバケットを使う（楽天と同じ実装）。
+* 1 リクエスト/秒を守るレートリミッタを使う（楽天と同じ実装）。
 
-## 3. 共通の運用ルール（PR 2 で実装）
+## 3. 共通の運用ルール（`collectors/` で実装）
 
 1. API キーは環境変数だけで扱う（`.env.example`）。ログや DB（`request_params`）には残さない。
 2. 1 リクエスト/秒以下に抑え、429 を受けたら指数バックオフする。同じクエリの短時間の再取得は避ける。

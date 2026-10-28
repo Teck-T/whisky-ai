@@ -11,7 +11,7 @@ LLM の学習と推論はこのリポジトリの範囲外です。
 * [ER図](docs/er_diagram.md)（Mermaid）
 * [楽天 / Yahoo! API 調査メモ](docs/api_research.md): 最新仕様、利用条件、データ保存条件
 
-## 現在の機能（PR 1）
+## 機能
 
 * 蒸留所 → 銘柄 → リリース → バッチ → ボトル（容量・度数）→ 販売商品 を区別した正規化スキーマ
 * JAN/EAN（チェックディジット検証）、商品名、容量、度数、熟成年数、バッチ番号による同一商品の照合
@@ -20,7 +20,7 @@ LLM の学習と推論はこのリポジトリの範囲外です。
 * メーカー希望小売価格は別テーブルに保存し、出典がないと登録できない
 * LLM 香味特徴 JSON の検証と保存（不正な出力も原文を保存する）
 
-価格収集モジュール（楽天 / Yahoo! API クライアント、モック）は次の PR で追加します（[設計書 §7](docs/design.md#7-価格収集pr-2の構成)）。
+* 楽天市場 / Yahoo!ショッピングの商品検索 API による価格収集。API キーがなければ架空のフィクスチャで動きます（[設計書 §7](docs/design.md#7-価格収集pr-2の構成)）
 
 ## セットアップ（macOS / Linux）
 
@@ -45,8 +45,10 @@ macOS で Python 3.13 がない場合は `brew install python@3.13` か `uv pyth
 | 変数 | 用途 |
 |---|---|
 | `WHISKY_AI_DB` | SQLite ファイルのパス（既定: `data/whisky_ai.sqlite3`） |
-| `RAKUTEN_APPLICATION_ID` / `RAKUTEN_ACCESS_KEY` / `RAKUTEN_REFERER` | 楽天 API（PR 2 で使用） |
-| `YAHOO_CLIENT_ID` | Yahoo!ショッピング API（PR 2 で使用） |
+| `RAKUTEN_APPLICATION_ID` / `RAKUTEN_ACCESS_KEY` | 楽天 API（両方必須） |
+| `RAKUTEN_REFERER` / `RAKUTEN_AFFILIATE_ID` | 楽天 API（任意。Referer はアプリ登録時のサイト URL） |
+| `YAHOO_CLIENT_ID` | Yahoo!ショッピング API |
+| `WHISKY_AI_RAW_RETENTION_DAYS` | API 生レスポンスの保持日数（既定 30。0 で保存しない） |
 
 API キーはリポジトリにコミットしないでください（`.env` は `.gitignore` 済み）。
 
@@ -60,7 +62,16 @@ whisky-ai stats
 whisky-ai review list      # 要確認キュー
 whisky-ai review accept <candidate_id> [--register-jan]
 whisky-ai review reject <listing_id>
+
+# 価格収集 (API キー未設定ならフィクスチャを使用)
+whisky-ai collect rakuten --keyword "Aokawa"
+whisky-ai collect yahoo --jan 2900000000049
+whisky-ai prices <bottle_id>  # 照合確定済み出品の最新価格
+whisky-ai purge-raw           # 保持期限切れの API 生レスポンスを削除
 ```
+
+API キーを設定すると実 API に接続します。1 リクエスト/秒以下に抑え、429 を受けたら待って再試行します。
+キーがない場合、収集データは `marketplace='mock'` として保存され、実データとは区別されます。
 
 別の DB を使う場合は `whisky-ai --db path/to.sqlite3 ...` と指定します。
 
