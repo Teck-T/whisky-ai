@@ -14,6 +14,10 @@
     whisky-ai watch add --bottle-id N | --keyword KW [--source rakuten|yahoo|both]
     whisky-ai watch list | enable ID | disable ID
     whisky-ai watch run [--mock] [--all]  期限の来た監視対象を収集 (cron / launchd 向け)
+    whisky-ai flavor schema        LLM 構造化出力用の JSON Schema を出力
+    whisky-ai flavor import FILE.jsonl  LLM の抽出結果を取り込む ('-' で標準入力)
+    whisky-ai flavor show RELEASE_ID
+    whisky-ai recommend --like RELEASE_ID | --taste sweetness=0.8,smokiness=0.2 [--max-price N]
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from whisky_ai import db, diagnostics, repository, sample_data, watchlist
+from whisky_ai import db, diagnostics, flavor, recommend, repository, sample_data, watchlist
 from whisky_ai.collectors.base import SearchQuery
 from whisky_ai.collectors.factory import build_collector
 from whisky_ai.collectors.pipeline import collect
@@ -46,6 +50,7 @@ def _cmd_seed(conn: sqlite3.Connection, _: argparse.Namespace) -> int:
         print("catalog is not empty; seed-sample expects a fresh database", file=sys.stderr)
         return 1
     cat = sample_data.load_sample_catalog(conn)
+    sample_data.load_sample_flavors(conn, cat)
     with conn:
         shop = repository.upsert_shop(conn, "mock", "mock-shop", "モック酒店 (架空)")
         src = repository.add_source(conn, "sample", "モック出品 (架空)")
@@ -190,6 +195,49 @@ def _cmd_watch(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_flavor(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
+    if args.action == "schema":
+        print(json.dumps(flavor.json_schema(), ensure_ascii=False, indent=2))
+    elif args.action == "import":
+        if args.file == "-":
+            stats = flavor.import_jsonl(conn, sys.stdin)
+        else:
+            with open(args.file, encoding="utf-8") as f:
+                stats = flavor.import_jsonl(conn, f)
+        errors = stats.pop("errors")
+        print(json.dumps(stats, ensure_ascii=False))
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 1 if errors else 0
+    elif args.action == "show":
+        prof = recommend.load_profiles(conn).get(args.release_id)
+        if prof is None:
+            print(f"release {args.release_id} has no valid flavor extractions", file=sys.stderr)
+            return 1
+        print(f"{prof.name} (抽出 {prof.n_extractions} 件)")
+        for axis, v in sorted(prof.axes.items(), key=lambda kv: -kv[1]):
+            print(f"  {axis:14s} {v:.2f} {'#' * round(v * 20)}")
+        print(f"  よく出る記述: {', '.join(prof.top_notes)}")
+    return 0
+
+
+def _cmd_recommend(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
+    try:
+        taste = recommend.parse_taste(args.taste) if args.taste else None
+        recs = recommend.recommend(conn, like_release_id=args.like, taste=taste, limit=args.limit,
+                                   max_price_jpy=args.max_price)
+    except (ValueError, KeyError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    for i, r in enumerate(recs, 1):
+        price = f"{r.best_price_jpy:,} 円 (税込・送料別)" if r.best_price_jpy else "価格情報なし"
+        print(f"{i:2d}. {r.profile.name}  類似度 {r.similarity:.2f}  {price}\n"
+              f"    {', '.join(r.profile.top_notes)}  [release {r.profile.release_id}]")
+    if not recs:
+        print("該当なし")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="whisky-ai")
     p.add_argument("--db", help=f"SQLite path (default: ${db.DEFAULT_DB_ENV} or {db.DEFAULT_DB_PATH})")
@@ -228,6 +276,19 @@ def build_parser() -> argparse.ArgumentParser:
     wrun = wsub.add_parser("run")
     wrun.add_argument("--mock", action="store_true", help="API キーがあってもフィクスチャを使う")
     wrun.add_argument("--all", action="store_true", help="間隔を無視して全対象を収集")
+    fl = sub.add_parser("flavor", help="香味特徴 (LLM 抽出結果)")
+    fl.set_defaults(func=_cmd_flavor)
+    fsub = fl.add_subparsers(dest="action", required=True)
+    fsub.add_parser("schema")
+    fsub.add_parser("import").add_argument("file", help="JSONL ファイル ('-' で標準入力)")
+    fsub.add_parser("show").add_argument("release_id", type=int)
+    rec = sub.add_parser("recommend", help="香味の近いリリースを推薦")
+    rec_target = rec.add_mutually_exclusive_group(required=True)
+    rec_target.add_argument("--like", type=int, metavar="RELEASE_ID")
+    rec_target.add_argument("--taste", help="例: sweetness=0.8,smokiness=0.2")
+    rec.add_argument("--max-price", type=int, help="税込実勢価格の上限 (円)")
+    rec.add_argument("--limit", type=int, default=10)
+    rec.set_defaults(func=_cmd_recommend)
     review = sub.add_parser("review")
     review.set_defaults(func=_cmd_review)
     rsub = review.add_subparsers(dest="action", required=True)
