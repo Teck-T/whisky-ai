@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from itertools import count
 
 from whisky_ai import repository as repo
+from whisky_ai.flavor import store_extraction
 from whisky_ai.normalize import make_gtin13
 
 
@@ -206,3 +207,79 @@ def sample_listings(cat: SampleCatalog) -> list[SampleListing]:
         out.append(SampleListing(f"mock-{next(n):04d}", f"【送料無料】{name} 700ml 正規品 箱付き",
                                  jan, 4000, display))
     return out
+
+
+# ===== 架空の香味抽出結果 (推薦の動作確認用) =====
+
+SAMPLE_FLAVOR_MODEL = "sample-fixture (架空データ)"
+
+# 蒸留所ごとの架空の個性 (軸: 0..1)
+_HOUSE_STYLE: dict[str, dict[str, float]] = {
+    "Aokawa": {"sweetness": 0.6, "fruitiness": 0.6, "floral": 0.5, "smokiness": 0.1},
+    "Kurogane": {"spiciness": 0.6, "body": 0.7, "woodiness": 0.5, "smokiness": 0.3},
+    "Hoshizora": {"sweetness": 0.7, "fruitiness": 0.5, "richness": 0.6, "smokiness": 0.1},
+    "Shirakaba": {"floral": 0.6, "maltiness": 0.5, "body": 0.3, "smokiness": 0.1},
+    "Glen Corrach": {"fruitiness": 0.7, "sweetness": 0.6, "floral": 0.4, "smokiness": 0.05},
+    "Ardvellan": {"smokiness": 0.9, "peatiness": 0.9, "body": 0.6, "sweetness": 0.3},
+    "Loch Saorsa": {"maltiness": 0.6, "spiciness": 0.4, "smokiness": 0.3, "body": 0.5},
+    "Ballymorrow": {"sweetness": 0.6, "fruitiness": 0.5, "body": 0.3, "smokiness": 0.05},
+    "Copper Hollow": {"sweetness": 0.8, "woodiness": 0.7, "spiciness": 0.5, "smokiness": 0.1},
+    "Tasman Ridge": {"richness": 0.6, "fruitiness": 0.5, "spiciness": 0.4, "smokiness": 0.2},
+    "Kirinuki": {"maltiness": 0.5, "sweetness": 0.5, "body": 0.6, "smokiness": 0.2},
+    "Inverbrae": {"floral": 0.7, "sweetness": 0.5, "body": 0.2, "smokiness": 0.05},
+}
+_NOTES = {
+    "sweetness": "バニラ", "fruitiness": "青リンゴ", "floral": "花", "smokiness": "スモーク",
+    "peatiness": "ピート", "spiciness": "シナモン", "woodiness": "オーク", "maltiness": "モルト",
+    "sherry": "レーズン", "body": "オイリー", "richness": "ダークチョコレート",
+}
+
+
+# ブランドの系統 (LINES の接尾辞) ごとの架空の差分
+_LINE_STYLE: dict[str, dict[str, float]] = {
+    " Blended": {"body": -0.2, "sweetness": 0.1},
+    " Reserve": {"maltiness": 0.2, "richness": 0.1},
+    " Harbour": {"smokiness": 0.2, "spiciness": 0.1},
+    " Founders": {"sweetness": 0.15, "body": -0.3},
+}
+
+
+def _sample_payload(house: str, release_name: str, variant: int) -> dict[str, object]:
+    axes = dict(_HOUSE_STYLE[house])
+    suffix = release_name.removeprefix(house).split(" Original")[0].split(" 1")[0]
+    for axis, delta in _LINE_STYLE.get(suffix, {}).items():
+        axes[axis] = min(1.0, max(0.0, axes.get(axis, 0.4) + delta))
+    if "Sherry" in release_name:
+        axes.update(sherry=0.9, richness=0.7, fruitiness=min(1.0, axes.get("fruitiness", 0.5) + 0.2))
+    if "Cask Strength" in release_name or "Small Batch" in release_name:
+        axes["body"] = 0.9
+    for age, bump in ((18, 0.2), (17, 0.15), (12, 0.1)):
+        if f"{age} " in release_name:
+            axes["woodiness"] = min(1.0, axes.get("woodiness", 0.3) + bump)
+            axes["finish_length"] = 0.5 + bump
+            break
+    # 同じリリースの複数抽出で少しだけ値を揺らす (平均の動作確認用)
+    axes = {k: round(min(1.0, max(0.0, v + (0.05 if variant else -0.05))), 2) for k, v in axes.items()}
+    top = sorted(axes, key=lambda k: -axes[k])[:3]
+    return {
+        "schema_version": "1",
+        "nose": [{"descriptor": _NOTES.get(top[0], top[0]), "intensity": axes[top[0]]}],
+        "palate": [{"descriptor": _NOTES.get(t, t)} for t in top[1:]],
+        "finish": [{"descriptor": _NOTES.get(top[-1], top[-1])}],
+        "axes": axes,
+        "summary": "架空のサンプル香味データ",
+        "confidence": 0.5,
+    }
+
+
+def load_sample_flavors(conn: sqlite3.Connection, cat: SampleCatalog) -> int:
+    """サンプルカタログの各リリースに、架空の香味抽出結果を 2 件ずつ登録する。"""
+    n = 0
+    for key, rid in cat.release_ids.items():
+        house = next((h for h in sorted(_HOUSE_STYLE, key=len, reverse=True) if key.startswith(h)),
+                     "Glen Corrach")  # Mistral Peak (ブレンデッド) は Glen Corrach 系とする
+        for variant in (0, 1):
+            store_extraction(conn, _sample_payload(house, key, variant), model_name=SAMPLE_FLAVOR_MODEL,
+                             prompt_version="sample", release_id=rid)
+            n += 1
+    return n

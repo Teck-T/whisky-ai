@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from typing import Any
 
 from whisky_ai.db import utcnow
@@ -133,3 +134,106 @@ def store_extraction(
                     (extraction_id, axis, float(value)),
                 )
     return extraction_id
+
+
+def json_schema() -> dict[str, Any]:
+    """スキーマ v1 の JSON Schema。
+
+    llama.cpp の ``--json-schema`` や Ollama の ``format`` など、ローカル LLM の
+    構造化出力 (文法制約付き生成) にそのまま渡せる形にしている。``validate_payload`` と同じ制約。
+    """
+    unit = {"type": "number", "minimum": 0, "maximum": 1}
+    note = {
+        "type": "object",
+        "properties": {
+            "descriptor": {"type": "string", "minLength": 1},
+            "category": {"type": "string"},
+            "intensity": unit,
+        },
+        "required": ["descriptor"],
+        "additionalProperties": False,
+    }
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": f"Whisky flavor extraction v{SCHEMA_VERSION}",
+        "type": "object",
+        "properties": {
+            "schema_version": {"const": SCHEMA_VERSION},
+            **{phase: {"type": "array", "items": note} for phase in PHASES},
+            "axes": {
+                "type": "object",
+                "properties": {axis: unit for axis in sorted(AXES)},
+                "additionalProperties": False,
+            },
+            "summary": {"type": "string"},
+            "confidence": unit,
+        },
+        "required": ["schema_version", "nose", "palate", "finish", "axes"],
+        "additionalProperties": True,
+    }
+
+
+TARGET_KEYS = ("bottle_id", "batch_id", "release_id")
+
+
+def import_jsonl(conn: sqlite3.Connection, lines: Iterable[str]) -> dict[str, Any]:
+    """LLM の出力を 1 行 1 件の JSONL で取り込む。
+
+    各行の形式::
+
+        {"target": {"release_id": 12},              # bottle_id / batch_id / release_id のどれか
+         "review": {"body": "...", "source_title": "...", "url": "...",
+                    "author": null, "lang": "ja"},  # 任意。元レビューも保存する場合
+         "model_name": "qwen2.5-32b-instruct", "model_revision": null,
+         "prompt_version": "flavor-v1",
+         "payload": {...}}                          # LLM の出力 (dict か JSON 文字列)
+
+    1 行が壊れていても他の行は取り込む。payload が不正な行は is_valid=0 で保存する。
+    """
+    stats: dict[str, Any] = {"valid": 0, "invalid": 0, "skipped": 0, "errors": []}
+    for lineno, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+            target = {k: rec["target"][k] for k in TARGET_KEYS if rec["target"].get(k) is not None}
+            if not target:
+                raise ValueError(f"target needs one of {TARGET_KEYS}")
+            for key, value in target.items():
+                table = {"bottle_id": "bottles", "batch_id": "batches", "release_id": "releases"}[key]
+                if conn.execute(f"SELECT 1 FROM {table} WHERE id = ?", (value,)).fetchone() is None:
+                    raise ValueError(f"{key}={value} not found")
+            review_id = _store_review(conn, rec["review"], target) if rec.get("review") else None
+            eid = store_extraction(
+                conn, rec["payload"], model_name=str(rec["model_name"]),
+                prompt_version=str(rec["prompt_version"]), model_revision=rec.get("model_revision"),
+                review_id=review_id, **target,
+            )
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, sqlite3.IntegrityError) as e:
+            stats["skipped"] += 1
+            stats["errors"].append(f"line {lineno}: {type(e).__name__}: {e}")
+            continue
+        ok = conn.execute("SELECT is_valid FROM flavor_extractions WHERE id = ?", (eid,)).fetchone()[0]
+        stats["valid" if ok else "invalid"] += 1
+    return stats
+
+
+def _store_review(conn: sqlite3.Connection, review: dict[str, Any], target: dict[str, int]) -> int:
+    body = review["body"]
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("review.body must be a non-empty string")
+    with conn:
+        src = conn.execute(
+            "INSERT INTO sources (kind, title, url, retrieved_at, note) VALUES (?, ?, ?, ?, ?)",
+            (review.get("source_kind", "manual_entry"), review.get("source_title") or "レビュー",
+             review.get("url"), utcnow(), review.get("note")),
+        ).lastrowid
+        cur = conn.execute(
+            "INSERT INTO reviews (release_id, batch_id, bottle_id, source_id, author, lang, body, rating,"
+            " reviewed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (target.get("release_id"), target.get("batch_id"), target.get("bottle_id"), src,
+             review.get("author"), review.get("lang"), body, review.get("rating"),
+             review.get("reviewed_at"), utcnow()),
+        )
+    assert cur.lastrowid is not None
+    return cur.lastrowid

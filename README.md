@@ -18,7 +18,7 @@ LLM の学習と推論はこのリポジトリの範囲外です。
 * 不確実な照合は自動統合せず、要確認キュー（`match_candidates`）に保存し、CLI で承認または却下
 * 価格履歴（税込 / 税抜、送料、在庫、取得日時、販売店、URL、情報源）のスキーマと書き込み API
 * メーカー希望小売価格は別テーブルに保存し、出典がないと登録できない
-* LLM 香味特徴 JSON の検証と保存（不正な出力も原文を保存する）
+* LLM 香味特徴 JSON の検証と保存（不正な出力も原文を保存する）、JSONL での一括取り込み、香味の近いウイスキーの推薦
 
 * 楽天市場 / Yahoo!ショッピングの商品検索 API による価格収集と、監視リストによる定期収集。API キーがなければ架空のフィクスチャで動きます（[設計書 §7](docs/design.md#7-価格収集pr-2の構成)）
 
@@ -127,6 +127,19 @@ tail data/logs/watch-*.log
 毎日 7:17 と 19:17 に起動します。API を呼ぶのは間隔（既定 24 時間）が過ぎた対象だけです。
 止めるときは `launchctl unload ~/Library/LaunchAgents/com.whisky-ai.watch.plist` を実行します。
 Mac がスリープ中だった回は、起動後に実行されます。
+
+## 香味データと推薦
+
+```bash
+whisky-ai flavor schema > flavor_schema.json   # LLM の構造化出力に渡す JSON Schema
+whisky-ai flavor import extractions.jsonl      # LLM の出力を取り込む (形式は docs/llm_handoff.md)
+whisky-ai flavor show 12                       # リリースの香味プロファイル
+whisky-ai recommend --like 12                  # リリース 12 に香味が近いもの
+whisky-ai recommend --taste sherry=0.9,sweetness=0.7,smokiness=0.1 --max-price 8000
+```
+
+`seed-sample` を実行すると、架空の香味データも入るので、すぐに推薦を試せます。
+価格は照合確定済みの出品の税込最安値で、送料は含みません。
 
 ## 開発
 
