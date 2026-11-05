@@ -42,8 +42,11 @@ class DailyBest:
 def observations(
     conn: sqlite3.Connection, bottle_id: int, since: datetime | None = None
 ) -> list[Observation]:
+    # 「? IS NULL OR ...」は PostgreSQL で型を決められないため、条件ごと組み立てる
+    since_sql = "AND p.observed_at >= ?" if since else ""
+    params: tuple[object, ...] = (bottle_id, since.strftime(_TS)) if since else (bottle_id,)
     rows = conn.execute(
-        """
+        f"""
         SELECT p.listing_id, p.observed_at, p.tax_included_price_jpy AS price, l.marketplace,
                s.name AS shop_name, l.item_url
         FROM price_observations p
@@ -51,10 +54,10 @@ def observations(
         LEFT JOIN shops s ON s.id = l.shop_id
         WHERE l.bottle_id = ? AND l.match_status = 'matched'
           AND p.tax_included_price_jpy IS NOT NULL AND COALESCE(p.in_stock, 1) = 1
-          AND (? IS NULL OR p.observed_at >= ?)
+          {since_sql}
         ORDER BY p.observed_at, p.id
         """,
-        (bottle_id, *(2 * [since.strftime(_TS) if since else None])),
+        params,
     )
     return [Observation(r["listing_id"], parse_ts(r["observed_at"]), r["price"], r["marketplace"],
                         r["shop_name"], r["item_url"]) for r in rows]

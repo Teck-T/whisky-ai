@@ -122,8 +122,8 @@ def add_alias(
     entity_id: int, alias: str, *, lang: str | None = None,
 ) -> None:
     conn.execute(
-        "INSERT OR IGNORE INTO aliases (entity_type, entity_id, alias, normalized, lang) "
-        "VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO aliases (entity_type, entity_id, alias, normalized, lang) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
         (entity_type, entity_id, alias, normalize_text(alias), lang),
     )
 
