@@ -402,8 +402,9 @@ def accept_candidate(
                     (f"照合レビューで確認 (listing {cand['listing_id']})", now, f"by {decided_by}"),
                 )
                 conn.execute(
-                    "INSERT OR IGNORE INTO product_identifiers "
-                    "(bottle_id, id_type, value, source_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO product_identifiers "
+                    "(bottle_id, id_type, value, source_id, created_at) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT DO NOTHING",
                     (cand["bottle_id"], gtin.id_type, gtin.value, cur.lastrowid, now),
                 )
 

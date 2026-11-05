@@ -22,6 +22,7 @@
     whisky-ai alert add --bottle-id N (--target-price 円 | --drop-pct %) [--lookback-days 30]
     whisky-ai alert list | remove ID | events
     whisky-ai alert check [--notify stdout,macos,webhook]
+    whisky-ai db-copy --from SRC --to DST  SQLite ⇄ PostgreSQL のデータ移行 (移行先は空であること)
 """
 
 from __future__ import annotations
@@ -31,11 +32,11 @@ import json
 import sqlite3
 import sys
 from collections.abc import Sequence
-from pathlib import Path
 
 from whisky_ai import (
     alerts,
     db,
+    dbcopy,
     diagnostics,
     flavor,
     price_history,
@@ -195,8 +196,7 @@ def _cmd_watch(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
         watchlist.set_enabled(conn, args.id, args.action == "enable")
         print(f"{args.action}d watch target {args.id}")
     elif args.action == "run":
-        lock = db.resolve_db_path(args.db).with_suffix(".lock")
-        with watchlist.single_instance(Path(lock)) as acquired:
+        with watchlist.single_instance(db.lock_path(args.db)) as acquired:
             if not acquired:
                 print("another watch run is in progress; skipped", file=sys.stderr)
                 return 0
@@ -316,6 +316,22 @@ def _cmd_alert(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_db_copy(_: sqlite3.Connection | None, args: argparse.Namespace) -> int:
+    src, dst = db.connect(args.source), db.connect(args.dest)
+    try:
+        db.migrate(src)
+        db.migrate(dst)
+        copied = dbcopy.copy_database(src, dst)
+    except (ValueError, sqlite3.Error) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    finally:
+        src.close()
+        dst.close()
+    print(json.dumps({t: n for t, n in copied.items() if n}, ensure_ascii=False))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="whisky-ai")
     p.add_argument("--db", help=f"SQLite path (default: ${db.DEFAULT_DB_ENV} or {db.DEFAULT_DB_PATH})")
@@ -355,6 +371,10 @@ def build_parser() -> argparse.ArgumentParser:
     wrun.add_argument("--mock", action="store_true", help="API キーがあってもフィクスチャを使う")
     wrun.add_argument("--all", action="store_true", help="間隔を無視して全対象を収集")
     wrun.add_argument("--no-alerts", action="store_true", help="収集後の値下がりチェックをしない")
+    cp = sub.add_parser("db-copy", help="DB 間のデータ移行 (SQLite ⇄ PostgreSQL)")
+    cp.add_argument("--from", dest="source", required=True, help="移行元 (SQLite のパスか postgresql:// URL)")
+    cp.add_argument("--to", dest="dest", required=True, help="移行先 (migrate 済みで空であること)")
+    cp.set_defaults(func=_cmd_db_copy)
     ph = sub.add_parser("price-history", help="日別最安値の推移")
     ph.add_argument("bottle_id", type=int)
     ph.add_argument("--days", type=int, default=90)
@@ -402,6 +422,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "db-copy":  # 接続先は --from / --to で指定する
+        return _cmd_db_copy(None, args)
     conn = db.connect(args.db)
     try:
         if args.command not in ("init-db", "seed-sample"):

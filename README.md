@@ -24,7 +24,7 @@ LLM の学習と推論はこのリポジトリの範囲外です。
 
 ## セットアップ（macOS / Linux）
 
-依存パッケージは開発ツールだけです（実行時は標準ライブラリのみ）。
+実行時の依存は標準ライブラリだけです（PostgreSQL を使う場合のみ psycopg が必要）。
 
 ```bash
 # uv を使う場合 (推奨)
@@ -157,10 +157,25 @@ whisky-ai alert events                              # 通知の履歴
   (Slack または Discord の Incoming Webhook URL)を設定します。
 * 同じ値下がりで何度も通知しません。いったん条件から外れて再び下がったときか、前回通知時よりさらに安くなったときにだけ通知します。
 
+## PostgreSQL で使う
+
+既定は SQLite ですが、接続先に URL を指定すると PostgreSQL で動きます。
+
+```bash
+uv pip install -e ".[postgres]"     # psycopg を追加
+export WHISKY_AI_DB="postgresql://user:password@localhost:5432/whisky_ai"
+whisky-ai init-db                  # PostgreSQL にテーブルを作成
+
+# SQLite の既存データを移す (移行先は空であること)
+whisky-ai db-copy --from data/whisky_ai.sqlite3 --to "$WHISKY_AI_DB"
+```
+
+Mac では `brew install postgresql@16` で入れられます。詳しくは[設計書 §8](docs/design.md#8-postgresql-対応pr-6)を参照してください。
+
 ## 開発
 
 ```bash
-pytest          # テスト
+pytest          # テスト (WHISKY_AI_TEST_PG_URL を設定すると PostgreSQL でも実行)
 ruff check src tests
 mypy            # strict
 ```
