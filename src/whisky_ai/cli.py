@@ -18,6 +18,10 @@
     whisky-ai flavor import FILE.jsonl  LLM の抽出結果を取り込む ('-' で標準入力)
     whisky-ai flavor show RELEASE_ID
     whisky-ai recommend --like RELEASE_ID | --taste sweetness=0.8,smokiness=0.2 [--max-price N]
+    whisky-ai price-history BOTTLE_ID [--days 90]  日別最安値 (税込・送料別、JST)
+    whisky-ai alert add --bottle-id N (--target-price 円 | --drop-pct %) [--lookback-days 30]
+    whisky-ai alert list | remove ID | events
+    whisky-ai alert check [--notify stdout,macos,webhook]
 """
 
 from __future__ import annotations
@@ -29,7 +33,17 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from whisky_ai import db, diagnostics, flavor, recommend, repository, sample_data, watchlist
+from whisky_ai import (
+    alerts,
+    db,
+    diagnostics,
+    flavor,
+    price_history,
+    recommend,
+    repository,
+    sample_data,
+    watchlist,
+)
 from whisky_ai.collectors.base import SearchQuery
 from whisky_ai.collectors.factory import build_collector
 from whisky_ai.collectors.pipeline import collect
@@ -187,11 +201,17 @@ def _cmd_watch(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
                 print("another watch run is in progress; skipped", file=sys.stderr)
                 return 0
             report = watchlist.run_due(conn, force_mock=args.mock, run_all=args.all)
+            errors = list(report.errors)
+            fired = 0
+            if not args.no_alerts:
+                events = alerts.evaluate(conn)
+                fired = len(events)
+                errors += alerts.notify(conn, events, alerts.default_channels())
         print(json.dumps({"ran": report.ran, "match_status": report.match_status,
-                          "errors": len(report.errors)}, ensure_ascii=False))
-        for e in report.errors:
+                          "alerts": fired, "errors": len(errors)}, ensure_ascii=False))
+        for e in errors:
             print(f"error: {e}", file=sys.stderr)
-        return 1 if report.errors else 0
+        return 1 if errors else 0
     return 0
 
 
@@ -238,6 +258,64 @@ def _cmd_recommend(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_price_history(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
+    name = conn.execute("SELECT display_name FROM bottles WHERE id = ?", (args.bottle_id,)).fetchone()
+    if name is None:
+        print(f"bottle {args.bottle_id} not found", file=sys.stderr)
+        return 2
+    series = price_history.history(conn, args.bottle_id, days=args.days)
+    print(f"{name[0]}  直近 {args.days} 日の日別最安値 (税込・送料別、在庫あり、JST)")
+    if not series:
+        print("  データなし (照合確定済みの出品の価格がまだありません)")
+        return 0
+    lo, hi = min(d.price_jpy for d in series), max(d.price_jpy for d in series)
+    for d in series:
+        bar = "#" * (1 + round(19 * (d.price_jpy - lo) / (hi - lo))) if hi > lo else "#"
+        print(f"  {d.day}  {d.price_jpy:>8,} 円  {bar:20s} {d.shop_name or d.marketplace}"
+              f" (出品 {d.listings})")
+    return 0
+
+
+def _cmd_alert(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
+    if args.action == "add":
+        try:
+            rid = alerts.add_rule(conn, args.bottle_id, target_price_jpy=args.target_price,
+                                  drop_pct=args.drop_pct, lookback_days=args.lookback_days)
+        except (ValueError, KeyError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"added alert rule {rid}")
+    elif args.action == "list":
+        for r in conn.execute(
+            "SELECT r.*, b.display_name FROM price_alert_rules r JOIN bottles b ON b.id = r.bottle_id"
+            " ORDER BY r.id"
+        ):
+            cond = (f"{r['target_price_jpy']:,} 円以下" if r["kind"] == "target_price"
+                    else f"相場 ({r['lookback_days']} 日中央値) より {r['drop_pct']:g}% 以上安い")
+            last = (f"前回通知 {r['last_fired_at']} {r['last_fired_price_jpy']:,} 円"
+                    if r["last_fired_at"] else "未通知")
+            print(f"[{r['id']}] {'on ' if r['enabled'] else 'off'} {r['display_name']}: {cond} | {last}")
+    elif args.action == "remove":
+        alerts.remove_rule(conn, args.id)
+        print(f"removed alert rule {args.id}")
+    elif args.action == "events":
+        for r in conn.execute("SELECT * FROM price_alert_events ORDER BY id DESC LIMIT ?", (args.limit,)):
+            print(f"{r['created_at']} [{r['notified_channels'] or '未送信'}] {r['message']}")
+    elif args.action == "check":
+        channels = args.notify.split(",") if args.notify else alerts.default_channels()
+        unknown = set(channels) - set(alerts.SENDERS)
+        if unknown:
+            print(f"error: unknown channel(s): {', '.join(sorted(unknown))}", file=sys.stderr)
+            return 2
+        events = alerts.evaluate(conn)
+        errors = alerts.notify(conn, events, channels)
+        print(f"{len(events)} alert(s)")
+        for err in errors:
+            print(f"error: {err}", file=sys.stderr)
+        return 1 if errors else 0
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="whisky-ai")
     p.add_argument("--db", help=f"SQLite path (default: ${db.DEFAULT_DB_ENV} or {db.DEFAULT_DB_PATH})")
@@ -276,6 +354,24 @@ def build_parser() -> argparse.ArgumentParser:
     wrun = wsub.add_parser("run")
     wrun.add_argument("--mock", action="store_true", help="API キーがあってもフィクスチャを使う")
     wrun.add_argument("--all", action="store_true", help="間隔を無視して全対象を収集")
+    wrun.add_argument("--no-alerts", action="store_true", help="収集後の値下がりチェックをしない")
+    ph = sub.add_parser("price-history", help="日別最安値の推移")
+    ph.add_argument("bottle_id", type=int)
+    ph.add_argument("--days", type=int, default=90)
+    ph.set_defaults(func=_cmd_price_history)
+    al = sub.add_parser("alert", help="値下がり通知")
+    al.set_defaults(func=_cmd_alert)
+    asub = al.add_subparsers(dest="action", required=True)
+    aadd = asub.add_parser("add")
+    aadd.add_argument("--bottle-id", type=int, required=True)
+    cond = aadd.add_mutually_exclusive_group(required=True)
+    cond.add_argument("--target-price", type=int, help="この価格 (税込・送料別) 以下で通知")
+    cond.add_argument("--drop-pct", type=float, help="相場よりこの % 以上安くなったら通知")
+    aadd.add_argument("--lookback-days", type=int, default=30, help="相場を求める期間 (日)")
+    asub.add_parser("list")
+    asub.add_parser("remove").add_argument("id", type=int)
+    asub.add_parser("events").add_argument("--limit", type=int, default=20)
+    asub.add_parser("check").add_argument("--notify", help="stdout,macos,webhook から選ぶ (既定: 自動)")
     fl = sub.add_parser("flavor", help="香味特徴 (LLM 抽出結果)")
     fl.set_defaults(func=_cmd_flavor)
     fsub = fl.add_subparsers(dest="action", required=True)

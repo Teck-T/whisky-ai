@@ -70,3 +70,31 @@ def test_cli_flavor_and_recommend(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert main(["--db", dbp, "recommend", "--like", "1", "--limit", "3"]) == 0
     assert " 1. " in capsys.readouterr().out
     assert main(["--db", dbp, "recommend", "--taste", "umami=1"]) == 2
+
+
+def test_cli_price_history_and_alerts(tmp_path: Path, capsys: pytest.CaptureFixture[str],
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    from whisky_ai import alerts
+
+    monkeypatch.setattr(alerts.platform, "system", lambda: "Linux")
+    monkeypatch.delenv(alerts.WEBHOOK_ENV, raising=False)
+    dbp = str(tmp_path / "w.sqlite3")
+    assert main(["--db", dbp, "seed-sample"]) == 0
+    assert main(["--db", dbp, "watch", "add", "--keyword", "Aokawa", "--source", "yahoo"]) == 0
+    assert main(["--db", dbp, "alert", "add", "--bottle-id", "4", "--target-price", "7000"]) == 0
+    with pytest.raises(SystemExit):  # 条件 (--target-price / --drop-pct) は必須
+        main(["--db", dbp, "alert", "add", "--bottle-id", "4"])
+    capsys.readouterr()
+    assert main(["--db", dbp, "watch", "run", "--mock"]) == 0
+    out = capsys.readouterr().out
+    assert "値下がり: Aokawa 12 Years 700ml が 6,200 円" in out and '"alerts": 1' in out
+    assert main(["--db", dbp, "alert", "check"]) == 0
+    assert "0 alert(s)" in capsys.readouterr().out  # 同じ価格では再通知しない
+    assert main(["--db", dbp, "alert", "events"]) == 0
+    assert "[stdout]" in capsys.readouterr().out
+    assert main(["--db", dbp, "price-history", "4"]) == 0
+    assert "6,200 円" in capsys.readouterr().out
+    assert main(["--db", dbp, "alert", "list"]) == 0
+    assert "7,000 円以下" in capsys.readouterr().out
+    assert main(["--db", dbp, "alert", "check", "--notify", "fax"]) == 2
+    assert main(["--db", dbp, "alert", "remove", "1"]) == 0
