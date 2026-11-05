@@ -16,14 +16,14 @@ from whisky_ai.sample_data import SampleCatalog
 
 
 def test_v1_database_upgrades_to_v2(tmp_path: Path) -> None:
-    """PR1 時点 (0001 のみ) の DB に 0002 だけが追加適用される。"""
+    """PR1 時点 (0001 のみ) の DB には 0002 以降だけが追加適用される。"""
     conn = db.connect(tmp_path / "old.sqlite3")
     first = db.load_migrations()[0]
     conn.executescript(first.sql)
     db.current_version(conn)
     with conn:
         conn.execute("INSERT INTO schema_migrations VALUES (1, ?, '2026-10-27T00:00:00Z')", (first.name,))
-    assert db.migrate(conn) == ["0002_watch_targets.sql"]
+    assert db.migrate(conn) == ["0002_watch_targets.sql", "0003_price_alerts.sql"]
 
 
 def test_add_targets_for_bottle_prefers_japanese_name_and_yahoo_jan(

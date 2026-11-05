@@ -20,7 +20,7 @@ LLM の学習と推論はこのリポジトリの範囲外です。
 * メーカー希望小売価格は別テーブルに保存し、出典がないと登録できない
 * LLM 香味特徴 JSON の検証と保存（不正な出力も原文を保存する）、JSONL での一括取り込み、香味の近いウイスキーの推薦
 
-* 楽天市場 / Yahoo!ショッピングの商品検索 API による価格収集と、監視リストによる定期収集。API キーがなければ架空のフィクスチャで動きます（[設計書 §7](docs/design.md#7-価格収集pr-2の構成)）
+* 楽天市場 / Yahoo!ショッピングの商品検索 API による価格収集と、監視リストによる定期収集、価格推移と値下がり通知。API キーがなければ架空のフィクスチャで動きます（[設計書 §7](docs/design.md#7-価格収集pr-2の構成)）
 
 ## セットアップ（macOS / Linux）
 
@@ -140,6 +140,22 @@ whisky-ai recommend --taste sherry=0.9,sweetness=0.7,smokiness=0.1 --max-price 8
 
 `seed-sample` を実行すると、架空の香味データも入るので、すぐに推薦を試せます。
 価格は照合確定済みの出品の税込最安値で、送料は含みません。
+
+## 価格の推移と値下がり通知
+
+```bash
+whisky-ai price-history 4 --days 90                 # 日別最安値 (税込・送料別、在庫あり、日本時間)
+whisky-ai alert add --bottle-id 4 --target-price 5500   # 5,500 円以下になったら通知
+whisky-ai alert add --bottle-id 4 --drop-pct 10     # 直近 30 日の相場より 10% 以上安くなったら通知
+whisky-ai alert list
+whisky-ai alert check                               # 今すぐ評価して通知
+whisky-ai alert events                              # 通知の履歴
+```
+
+* `watch run`(launchd の定期収集)は、収集のあとに自動で値下がりをチェックします。
+* 通知先は、画面とログ、macOS の通知センター、Webhook です。Webhook を使うときは `.env` に `WHISKY_AI_WEBHOOK_URL`
+  (Slack または Discord の Incoming Webhook URL)を設定します。
+* 同じ値下がりで何度も通知しません。いったん条件から外れて再び下がったときか、前回通知時よりさらに安くなったときにだけ通知します。
 
 ## 開発
 
